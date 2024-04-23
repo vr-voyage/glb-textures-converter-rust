@@ -24,6 +24,11 @@ use bytes::Buf;
 
 use ddsfile::{AlphaMode, Caps2, D3D10ResourceDimension, Dds, DxgiFormat, NewDxgiParams};
 
+/* I'm completely new to Rust so if you see anything
+ * wrong, it probably is.
+ * I'm just focusing on the features on the moment.
+ */
+
 
 #[derive(Deserialize)]
 struct Image
@@ -72,9 +77,15 @@ fn main() {
     }
 
     let glb_filename = &args[1];
+    let output_filename = &args[2];
 
     match std::fs::read(glb_filename) {
-        Ok(bytes) => { parse_and_convert_glb_textures(bytes); }
+        Ok(bytes) => { 
+            let out_glb = parse_and_convert_glb_textures(bytes);
+            let mut f = OpenOptions::new().write(true).create(true).open(output_filename).unwrap();
+            f.write(&out_glb[..]);
+            f.sync_all().unwrap();
+        }
         Err(e) => {
             if e.kind() == std::io::ErrorKind::PermissionDenied {
                 eprintln!("please run again with appropriate permissions.");
@@ -113,7 +124,12 @@ fn mark_bufferview_used_by_images(images: &Vec<Image>, buffer_views: &mut Vec<Bu
     }
 }
 
-
+/**
+ * Convert the image provided to DDS, compressed using the BC7 algorithm
+ * @param buffer The buffer containing the image data to convert
+ * @returns (width, height, buffer_with_dds_data)
+ * @note The returned buffer has no header
+ */
 fn convert_image_content_in(buffer: &[u8]) -> (u32, u32, Vec<u8>)
 {
     let img = Reader::new(Cursor::new(buffer)).with_guessed_format().unwrap().decode().unwrap();
@@ -224,8 +240,9 @@ fn convert_images_and_rebuild_buffer(images: &Vec<Image>, buffer_views: &mut Vec
 const GLB_HEADER_MAGIC:u32 = 0x46546C67;
 const GLB_JSON_CHUNK_MAGIC:u32 = 0x4E4F534A;
 const GLB_DATA_CHUNK_MAGIC:u32 = 0x004E4942;
+const GLB_VERSION:u32 = 2;
 
-fn write_back_new_glb(json_content: &str, binary_content: &Vec<u8>, output_filepath: &str)
+fn create_glb(json_content: &str, binary_content: &Vec<u8>) -> Vec<u8>
 {
     let json_chunk_length: u32 = json_content.len() as u32;
     let binary_chunk_length: u32 = binary_content.len() as u32;
@@ -239,34 +256,25 @@ fn write_back_new_glb(json_content: &str, binary_content: &Vec<u8>, output_filep
         + chunk_header_length
         + binary_chunk_length;
 
-    const glb_header_magic:u32 = 0x46546C67;
-    const glb_version:u32 = 2;
-    const glb_json_chunk_magic:u32 = 0x4E4F534A;
+    let mut out_buffer: Vec<u8> = Vec::new();
+    let mut writer = Cursor::new(&mut out_buffer);
 
-    let mut f = OpenOptions::new().write(true).create(true).open(output_filepath).unwrap();
-    f.write(&GLB_HEADER_MAGIC.to_le_bytes());
-    f.write(&glb_version.to_le_bytes());
-    f.write(&total_length.to_le_bytes());
+    writer.write(&GLB_HEADER_MAGIC.to_le_bytes());
+    writer.write(&GLB_VERSION.to_le_bytes());
+    writer.write(&total_length.to_le_bytes());
 
-    f.write(&json_chunk_length.to_le_bytes());
-    f.write(&GLB_JSON_CHUNK_MAGIC.to_le_bytes());
-    f.write(json_content.as_bytes());
+    writer.write(&json_chunk_length.to_le_bytes());
+    writer.write(&GLB_JSON_CHUNK_MAGIC.to_le_bytes());
+    writer.write(json_content.as_bytes());
 
-    f.write(&binary_chunk_length.to_le_bytes());
-    f.write(&GLB_DATA_CHUNK_MAGIC.to_le_bytes());
-    f.write(&binary_content[..]);
+    writer.write(&binary_chunk_length.to_le_bytes());
+    writer.write(&GLB_DATA_CHUNK_MAGIC.to_le_bytes());
+    writer.write(&binary_content[..]);
 
-    f.sync_all().unwrap();
+    return out_buffer.into();
 }
 
-/* I'm completely new to Rust and most of the documentation
-   I've seen is complete garbage and provide no real information
-   about how to tackle binary reading correctly without
-   going from C like methods (which works by the way).
-   The thing is, if I want to write C, I'll write C.
-*/
-
-fn parse_and_convert_glb_textures(glb: Vec<u8>)
+fn parse_and_convert_glb_textures(glb: Vec<u8>) -> Vec<u8>
 {
 
     let mut glb_data = glb.as_slice();
@@ -316,13 +324,17 @@ fn parse_and_convert_glb_textures(glb: Vec<u8>)
     let binary_block_type: u32 = glb_data.get_u32_le();
     if binary_block_type != GLB_DATA_CHUNK_MAGIC
     {
-        println!("Wrong magic for the Binary Chunk. Expected {:x} got {:x}", GLB_DATA_CHUNK_MAGIC, binary_block_type);
-        return;
+        panic!("Wrong magic for the Binary Chunk. Expected {:x} got {:x}", GLB_DATA_CHUNK_MAGIC, binary_block_type);
     }
     let new_buffer = convert_images_and_rebuild_buffer(&gltf.images, gltf_buffer_views, &mut gltf_json, &glb_data);
-    write_back_new_glb(&gltf_json.to_string(), &new_buffer, "out.glb");
 
-    return;
+    /* Pretty ugly, I should try to see if I can
+     * - allocate memory BEFORE new_buffer
+     * - store "glb header/json chunk header/json chunk data/binary chunk header" just before it
+     */
+    return create_glb(&gltf_json.to_string(), &new_buffer);
+
+    
 
     /*
     let rgb_img = image::open(Path::new(&args[1])).unwrap();

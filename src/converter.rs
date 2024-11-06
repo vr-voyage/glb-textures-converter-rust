@@ -289,11 +289,11 @@ fn convert_images_and_rebuild_buffer(
             
         }
     }
-    gltf_json["asset"]["generator"] = "Voyage GLB Texture converter".into();
-    gltf_json["asset"]["version"] = "20240403".into();
-    gltf_json["extensions_used"] = json!(["EXT_voyage_exporter"]);
+    /*gltf_json["asset"]["generator"] = "Voyage GLB Texture converter".into();
+    gltf_json["asset"]["version"] = "20240403".into();*/
+    gltf_json["extensionsUsed"] = json!(["EXT_voyage_exporter"]);
 
-    gltf_json["extensions_required"] = json!(["EXT_voyage_exporter"]);
+    gltf_json["extensionsRequired"] = json!(["EXT_voyage_exporter"]);
 
     return output_buffer;
 }
@@ -311,6 +311,14 @@ fn convert_image_content_in(buffer: &[u8]) -> (u32, u32, Vec<u8>)
     let width = rgba8_image.width();
     let height = rgba8_image.height();
 
+    let rgba8_content = &rgba8_image.into_raw()[..];
+    /*for b in 0..rgba8_content.len()
+    {
+        if (b & 7) == 0 { print!("\n"); }
+        print!("0x{:x} ", rgba8_content[b]);
+    }
+    print!("\n");*/
+
     let block_count = intel_tex_2::divide_up_by_multiple(width * height, 16);
     println!("Block count: {}", block_count);
     println!("width {} - height {}", width, height);
@@ -324,7 +332,7 @@ fn convert_image_content_in(buffer: &[u8]) -> (u32, u32, Vec<u8>)
         caps2: Some(Caps2::empty()),
         is_cubemap: false,
         resource_dimension: D3D10ResourceDimension::Texture2D,
-        alpha_mode: AlphaMode::Opaque,
+        alpha_mode: AlphaMode::Straight,
     };
     // BC7
     {
@@ -337,12 +345,12 @@ fn convert_image_content_in(buffer: &[u8]) -> (u32, u32, Vec<u8>)
             width,
             height,
             stride: width * 4,
-            data: &rgba8_image.into_raw()[..],
+            data: rgba8_content,
         };
 
         println!("Compressing to BC7...");
         bc7::compress_blocks_into(
-            &bc7::opaque_ultra_fast_settings(),
+            &bc7::alpha_ultra_fast_settings(),
             &surface,
             dds.get_mut_data(0 /* layer */).unwrap(),
         );

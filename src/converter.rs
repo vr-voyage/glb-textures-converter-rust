@@ -8,6 +8,7 @@ use std::io::Write;
 use serde_json::Value;
 use serde_json::json;
 use serde::{Deserialize};
+use std::fmt;
 
 const GLB_HEADER_MAGIC:u32 = 0x46546C67;
 const GLB_JSON_CHUNK_MAGIC:u32 = 0x4E4F534A;
@@ -230,10 +231,30 @@ fn mark_bufferview_used_by_images(images: &Vec<Image>, buffer_views: &mut Vec<Bu
     for i in 0..images.len()
     {
         let image: &Image = &images[i];
+        if image.mime_type == "image/raw"
+        {
+            continue;
+        }
         let buffer_view: &mut BufferView = &mut buffer_views[image.buffer_view_index as usize];
         println!("Image[{}] : Marking buffer {}", i, image.buffer_view_index);
 
         buffer_view.used_by_image = i as i32;
+    }
+}
+
+#[derive(PartialEq)]
+enum CompressionFormat
+{
+    RGBA8,
+    BC7
+}
+
+impl fmt::Display for CompressionFormat {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            CompressionFormat::RGBA8 => write!(f, "RGBA8"),
+            CompressionFormat::BC7 => write!(f, "BC7"),
+        }
     }
 }
 
@@ -271,19 +292,19 @@ fn convert_images_and_rebuild_buffer(
         else
         {
             println!("Attempting conversion of {}", b);
-            let (width, height, converted_image) = convert_image_content_in(buffer_content);
+            let (width, height, converted_image, compression_format) = convert_image_content_in(buffer_content);
             let converted_image_content = &converted_image[..];
             //write_content_to(converted_image_content, format!("out{}.dds", b).as_str());
             output_buffer.write(converted_image_content).unwrap();
          
             gltf_buffer_view["byteLength"] = converted_image.len().into();
             let gltf_image = &mut gltf_json["images"][image_index as usize];
-            gltf_image["mimeType"] = "image/dds".into();
+            gltf_image["mimeType"] =  if compression_format == CompressionFormat::BC7 { "image/dds".into() } else { "image/raw".into() };
             gltf_image["extensions"] = json!({
                 "EXT_voyage_exporter": {
                     "width": width,
                     "height": height,
-                    "format": "BC7"
+                    "format": compression_format.to_string()
                 }
             });
             
@@ -298,27 +319,18 @@ fn convert_images_and_rebuild_buffer(
     return output_buffer;
 }
 
-/**
- * Convert the image provided to DDS, compressed using the BC7 algorithm
- * @param buffer The buffer containing the image data to convert
- * @returns (width, height, buffer_with_dds_data)
- * @note The returned buffer has no header
- */
-fn convert_image_content_in(buffer: &[u8]) -> (u32, u32, Vec<u8>)
+/*fn multiple_of_4(value: u32) -> bool
 {
-    let img = Reader::new(Cursor::new(buffer)).with_guessed_format().unwrap().decode().unwrap();
-    let rgba8_image = img.to_rgba8();
-    let width = rgba8_image.width();
-    let height = rgba8_image.height();
+    return (value / 4 * 4) == value;
+}*/
 
-    let rgba8_content = &rgba8_image.into_raw()[..];
-    /*for b in 0..rgba8_content.len()
-    {
-        if (b & 7) == 0 { print!("\n"); }
-        print!("0x{:x} ", rgba8_content[b]);
-    }
-    print!("\n");*/
+fn convert_image_as_raw_rgba8(width: u32, height: u32, rgba8_content: &[u8]) -> (u32, u32, Vec<u8>, CompressionFormat)
+{
+    return (width, height, rgba8_content.to_vec(), CompressionFormat::RGBA8);
+}
 
+fn convert_image_as_bc7(width: u32, height: u32, rgba8_content: &[u8])  -> (u32, u32, Vec<u8>, CompressionFormat)
+{
     let block_count = intel_tex_2::divide_up_by_multiple(width * height, 16);
     println!("Block count: {}", block_count);
     println!("width {} - height {}", width, height);
@@ -335,31 +347,64 @@ fn convert_image_content_in(buffer: &[u8]) -> (u32, u32, Vec<u8>)
         alpha_mode: AlphaMode::Straight,
     };
     // BC7
+    let mut dds = Dds::new_dxgi(NewDxgiParams {
+        format: DxgiFormat::BC7_UNorm,
+        ..dds_defaults
+    })
+    .unwrap();
+    let surface = intel_tex_2::RgbaSurface {
+        width,
+        height,
+        stride: width * 4,
+        data: rgba8_content,
+    };
+
+    println!("Compressing to BC7...");
+    bc7::compress_blocks_into(
+        &bc7::alpha_ultra_fast_settings(),
+        &surface,
+        dds.get_mut_data(0 /* layer */).unwrap(),
+    );
+    println!("  Done!");
+
+    //dds.write(&mut OpenOptions::new().write(true).create(true).open("a.dds").unwrap());
+    let dds_data = dds.get_data(0).unwrap();
+    return (width, height, dds_data.to_vec(), CompressionFormat::BC7);
+    
+}
+
+/**
+ * Convert the image provided to DDS, compressed using the BC7 algorithm
+ * @param buffer The buffer containing the image data to convert
+ * @returns (width, height, buffer_with_dds_data)
+ * @note The returned buffer has no header
+ */
+fn convert_image_content_in(buffer: &[u8]) -> (u32, u32, Vec<u8>, CompressionFormat)
+{
+    let img = Reader::new(Cursor::new(buffer)).with_guessed_format().unwrap().decode().unwrap();
+    let rgba8_image = img.to_rgba8();
+    let width = rgba8_image.width();
+    let height = rgba8_image.height();
+    let rgba8_content = &rgba8_image.into_raw()[..];
+
+    if (width * height) < (256*256)
     {
-        let mut dds = Dds::new_dxgi(NewDxgiParams {
-            format: DxgiFormat::BC7_UNorm,
-            ..dds_defaults
-        })
-        .unwrap();
-        let surface = intel_tex_2::RgbaSurface {
-            width,
-            height,
-            stride: width * 4,
-            data: rgba8_content,
-        };
-
-        println!("Compressing to BC7...");
-        bc7::compress_blocks_into(
-            &bc7::alpha_ultra_fast_settings(),
-            &surface,
-            dds.get_mut_data(0 /* layer */).unwrap(),
-        );
-        println!("  Done!");
-
-        //dds.write(&mut OpenOptions::new().write(true).create(true).open("a.dds").unwrap());
-        let dds_data = dds.get_data(0).unwrap();
-        return (width, height, dds_data.to_vec());
+        return convert_image_as_raw_rgba8(width, height, rgba8_content);
     }
+    else
+    {
+        return convert_image_as_bc7(width, height, rgba8_content);
+    }
+    
+
+    /*for b in 0..rgba8_content.len()
+    {
+        if (b & 7) == 0 { print!("\n"); }
+        print!("0x{:x} ", rgba8_content[b]);
+    }
+    print!("\n");*/
+
+
 }
 
 

@@ -5,3 +5,10 @@ DDS (BC7 compression) textures instead of PNG/JPG textures,
 in order to load them in-game using
 [a loader script made for VRChat (Unity/C#)](https://github.com/vr-voyage/vrchat-glb-loader).
 
+# Compiling
+
+To compile this project, just install the Rust toolchain and type :
+
+```
+cargo build --release
+```
